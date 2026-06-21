@@ -182,4 +182,100 @@ mod tests {
 
         println!("test_make passed");
     }
+
+
+
+    #[test]
+    fn test_make_and_take() {
+        let mut s = setup_make(100_000_000, 500_000_000, 10_000_000_000);
+
+        let escrow_account = s.svm.get_account(&s.escrow).expect("escrow not found");
+        assert_eq!(escrow_account.owner, program_id());
+        assert_eq!(escrow_account.data.len(), 113);
+
+        let vault_balance = read_token_balance(&s.svm, &s.vault);
+        assert_eq!(vault_balance, s.amount_to_give);
+
+        let maker_balance_a = read_token_balance(&s.svm, &s.maker_ata_a);
+        assert_eq!(maker_balance_a, 10_000_000_000 - s.amount_to_give);
+
+        println!("make passed");
+
+        let taker = Keypair::new();
+        s.svm
+            .airdrop(&taker.pubkey(), 10 * LAMPORTS_PER_SOL)
+            .expect("Airdrop to taker failed");
+
+        let taker_ata_b = CreateAssociatedTokenAccount::new(&mut s.svm, &taker, &s.mint_b)
+            .owner(&taker.pubkey())
+            .send()
+            .unwrap();
+
+        MintTo::new(
+            &mut s.svm,
+            &s.maker,
+            &s.mint_b,
+            &taker_ata_b,
+            s.amount_to_receive,
+        )
+        .send()
+        .unwrap();
+
+        let maker_ata_b = CreateAssociatedTokenAccount::new(&mut s.svm, &s.maker, &s.mint_b)
+            .owner(&s.maker.pubkey())
+            .send()
+            .unwrap();
+
+        let taker_ata_a =
+            spl_associated_token_account::get_associated_token_address(&taker.pubkey(), &s.mint_a);
+
+        let take_data = vec![1u8];
+
+        let ix = Instruction {
+            program_id: program_id(),
+            accounts: vec![
+                AccountMeta::new(s.maker.pubkey(), false),
+                AccountMeta::new_readonly(s.mint_a, false),
+                AccountMeta::new_readonly(s.mint_b, false),
+                AccountMeta::new(maker_ata_b, false),
+                AccountMeta::new(taker.pubkey(), true),
+                AccountMeta::new(taker_ata_a, false),
+                AccountMeta::new(taker_ata_b, false),
+                AccountMeta::new(s.escrow, false),
+                AccountMeta::new(s.vault, false),
+                AccountMeta::new_readonly(system_program(), false),
+                AccountMeta::new_readonly(TOKEN_PROGRAM_ID, false),
+                AccountMeta::new_readonly(ata_program(), false),
+            ],
+            data: take_data,
+        };
+
+        let msg = Message::new(&[ix], Some(&taker.pubkey()));
+        let blockhash = s.svm.latest_blockhash();
+        let tx = Transaction::new(&[&taker], msg, blockhash);
+
+        let meta = s.svm.send_transaction(tx).expect("Take instruction failed");
+        println!("Take CU: {}", meta.compute_units_consumed);
+
+        let maker_balance_b = read_token_balance(&s.svm, &maker_ata_b);
+        assert_eq!(maker_balance_b, s.amount_to_receive);
+
+        let taker_balance_a = read_token_balance(&s.svm, &taker_ata_a);
+        assert_eq!(taker_balance_a, s.amount_to_give);
+
+        let taker_balance_b = read_token_balance(&s.svm, &taker_ata_b);
+        assert_eq!(taker_balance_b, 0);
+
+        assert!(
+            s.svm.get_account(&s.vault).is_none(),
+            "Vault ATA should be closed after take"
+        );
+
+        assert!(
+            s.svm.get_account(&s.escrow).is_none(),
+            "Escrow state account should be closed after take"
+        );
+
+        println!("test_make_and_take passed");
+    }
 }
